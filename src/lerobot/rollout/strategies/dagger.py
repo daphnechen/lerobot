@@ -49,6 +49,7 @@ import enum
 import logging
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from threading import Event, Lock
 from typing import Any
 
@@ -325,7 +326,9 @@ class DAggerStrategy(RolloutStrategy):
             try:
                 self._await_saves()
             finally:
-                self._save_executor.shutdown(wait=True)
+                # wait=False: _await_saves already gave it a bounded chance.
+                # Blocking again here would restore the hang it exists to stop.
+                self._save_executor.shutdown(wait=False)
                 self._save_executor = None
         if self._push_executor is not None:
             logger.info("Shutting down push executor (waiting for pending pushes)...")
@@ -879,10 +882,30 @@ class DAggerStrategy(RolloutStrategy):
 
         self._pending_save = self._save_executor.submit(_save)
 
-    def _await_saves(self) -> None:
-        """Block until every queued episode is on disk."""
-        if self._pending_save is not None:
-            self._pending_save.result()
+    # Long enough for an episode's videos to encode, short enough that a stuck
+    # writer cannot hold a session hostage. A four-minute session once sat in
+    # teardown for eighteen minutes and wrote one episode of four.
+    SAVE_TIMEOUT_S = 180.0
+
+    def _await_saves(self, timeout: float | None = None) -> None:
+        """Block until every queued episode is on disk, but not forever.
+
+        Each episode is finished on disk as soon as its own save completes, so
+        giving up here costs at most the one still in flight -- where waiting
+        forever costs the session, which is what happened.
+        """
+        if self._pending_save is None:
+            return
+        try:
+            self._pending_save.result(
+                timeout=self.SAVE_TIMEOUT_S if timeout is None else timeout)
+        except FuturesTimeoutError:
+            logger.error(
+                "an episode save did not finish within %.0f s. Earlier episodes "
+                "are already complete on disk; this one may be truncated. The "
+                "writer thread is still running and will be abandoned at exit.",
+                self.SAVE_TIMEOUT_S if timeout is None else timeout)
+        finally:
             self._pending_save = None
 
     def _background_push(self, dataset, cfg) -> None:
