@@ -266,6 +266,12 @@ class DAggerStrategy(RolloutStrategy):
         self._pedal_thread = None
         self._events = DAggerEvents()
         self._push_executor: ThreadPoolExecutor | None = None
+        # One worker, deliberately. The dataset writer mutates shared metadata
+        # -- the episode list and the running totals -- with no locking of its
+        # own, so two saves must never overlap. Serialising them here is what
+        # makes writing off the control thread safe.
+        self._save_executor: ThreadPoolExecutor | None = None
+        self._pending_save: Future | None = None
         self._pending_push: Future | None = None
         self._needs_push = Event()
         self._episode_lock = Lock()
@@ -274,6 +280,7 @@ class DAggerStrategy(RolloutStrategy):
         """Initialise the inference engine and input device listener."""
         self._init_engine(ctx)
         self._push_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dagger-push")
+        self._save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dagger-save")
         target_mb = self.config.target_video_file_size_mb or DEFAULT_VIDEO_FILE_SIZE_IN_MB
         self._episode_duration_s = estimate_max_episode_seconds(
             ctx.data.dataset_features, ctx.runtime.cfg.fps, target_size_mb=target_mb
@@ -311,6 +318,13 @@ class DAggerStrategy(RolloutStrategy):
             self._listener.stop()
 
         # Flush any queued/running push cleanly
+        if self._save_executor is not None:
+            logger.info("Waiting for queued episode saves...")
+            try:
+                self._await_saves()
+            finally:
+                self._save_executor.shutdown(wait=True)
+                self._save_executor = None
         if self._push_executor is not None:
             logger.info("Shutting down push executor (waiting for pending pushes)...")
             self._push_executor.shutdown(wait=True)
@@ -526,6 +540,9 @@ class DAggerStrategy(RolloutStrategy):
                 timer.log_run_summary()
                 engine.pause()
                 with contextlib.suppress(Exception):
+                    # Any queued save must land first: this one writes the live
+                    # buffer and the writer's metadata is not concurrency-safe.
+                    self._await_saves()
                     with self._episode_lock:
                         dataset.save_episode()
                     self._needs_push.set()
@@ -607,8 +624,7 @@ class DAggerStrategy(RolloutStrategy):
 
                         # Correction ended -> save episode (blocking if not streaming)
                         if old_phase == DAggerPhase.CORRECTING and new_phase == DAggerPhase.PAUSED:
-                            with self._episode_lock:
-                                dataset.save_episode()
+                            self._save_episode_async(dataset)
                             recorded += 1
                             self._needs_push.set()
                             logger.info(
@@ -617,9 +633,6 @@ class DAggerStrategy(RolloutStrategy):
                                 self.config.num_episodes,
                             )
                             log_say(f"Correction {recorded} saved", play_sounds)
-                            # ``save_episode`` blocks inside the timed loop body: report
-                            # the correction, then drop the partial group and the gap it
-                            # opened, which are finalisation rather than cadence.
                             timer.log_episode_summary(f"correction {recorded}")
                             timer.restart()
 
@@ -712,6 +725,9 @@ class DAggerStrategy(RolloutStrategy):
                 timer.log_run_summary()
                 engine.pause()
                 with contextlib.suppress(Exception):
+                    # Any queued save must land first: this one writes the live
+                    # buffer and the writer's metadata is not concurrency-safe.
+                    self._await_saves()
                     with self._episode_lock:
                         dataset.save_episode()
                     self._needs_push.set()
@@ -823,6 +839,45 @@ class DAggerStrategy(RolloutStrategy):
     # ------------------------------------------------------------------
     # Background push (shared by both modes)
     # ------------------------------------------------------------------
+
+    def _save_episode_async(self, dataset) -> None:
+        """Hand the finished episode to a writer thread and keep controlling.
+
+        save_episode() waits for every frame to reach disk, computes statistics
+        and writes metadata. On a bimanual UR5e that took 2.5 s inside the timed
+        loop body, and a force-mode arm holds its pose only while something
+        keeps commanding it -- so the control loop stopping is the arm being let
+        go. Measured: after the gap the loop resumed with a 9.3 mm step and the
+        wrist swung 1.5 deg and sprang back, once per correction.
+
+        take_episode_buffer() detaches the frames and installs a fresh buffer
+        with the next index, so recording can continue immediately;
+        save_episode(episode_data=...) then leaves the live buffer alone.
+        Saves run one at a time on a single worker because the writer's
+        metadata is not concurrency-safe.
+        """
+        buffer = dataset.take_episode_buffer()
+        if self._save_executor is None:          # teardown, or no executor
+            with self._episode_lock:
+                dataset.save_episode(episode_data=buffer)
+            return
+
+        previous = self._pending_save
+        def _save():
+            # Chain on the previous save rather than trusting the pool's
+            # ordering: a lost ordering here means two writers in the metadata.
+            if previous is not None:
+                previous.result()
+            with self._episode_lock:
+                dataset.save_episode(episode_data=buffer)
+
+        self._pending_save = self._save_executor.submit(_save)
+
+    def _await_saves(self) -> None:
+        """Block until every queued episode is on disk."""
+        if self._pending_save is not None:
+            self._pending_save.result()
+            self._pending_save = None
 
     def _background_push(self, dataset, cfg) -> None:
         """Queue a Hub push on the single-worker executor.

@@ -268,6 +268,26 @@ class DatasetWriter:
 
         self.episode_buffer["size"] += 1
 
+    def take_episode_buffer(self) -> dict:
+        """Detach the current episode buffer and install a fresh one.
+
+        For callers that want to save an episode without blocking: take the
+        buffer here, on whatever thread owns recording, then hand it to
+        save_episode(episode_data=...) from somewhere else. save_episode leaves
+        the live buffer alone when it is given explicit data, so the two do not
+        collide.
+
+        The new buffer's index has to be passed explicitly. _create_episode_buffer
+        derives it from meta.total_episodes, and that only increments once the
+        save completes -- so a buffer created here while the previous episode is
+        still being written would otherwise carry the same episode_index, and two
+        episodes would claim the same frames directory.
+        """
+        buffer = self.episode_buffer
+        next_index = int(buffer["episode_index"]) + 1
+        self.episode_buffer = self._create_episode_buffer(episode_index=next_index)
+        return buffer
+
     def save_episode(
         self,
         episode_data: dict | None = None,

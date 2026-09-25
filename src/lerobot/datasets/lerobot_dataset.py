@@ -488,6 +488,16 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self._require_writer("add_frame")
         self.writer.add_frame(frame)
 
+    def take_episode_buffer(self) -> dict:
+        """Detach the current episode buffer and install a fresh one.
+
+        Delegates to :meth:`DatasetWriter.take_episode_buffer`. Pair it with
+        ``save_episode(episode_data=...)`` to write an episode off the thread
+        that is recording.
+        """
+        self._require_writer("take_episode_buffer")
+        return self.writer.take_episode_buffer()
+
     def save_episode(self, episode_data: dict | None = None, parallel_encoding: bool = True) -> None:
         """Save the current episode buffer to disk.
 
