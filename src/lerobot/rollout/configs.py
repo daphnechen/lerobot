@@ -204,6 +204,26 @@ class DAggerStrategyConfig(RolloutStrategyConfig):
     # pose on engage: the handover is already continuous there, and the blocking
     # interpolation only delays the start of the correction.
     smooth_handover: bool = True
+    # Write finished episodes on a background thread instead of blocking the
+    # control loop.
+    #
+    # OFF by default, and the reason is a lost session rather than caution.
+    # Blocking costs a visible twitch: save_episode() stops the loop for
+    # seconds, and a force-mode arm holds its pose only while something keeps
+    # commanding it, so the arm sags and springs back when commanding resumes.
+    # Moving the save off the loop removed that entirely, confirmed on a
+    # bimanual UR5e across seven corrections.
+    #
+    # But combined with per-episode video encoding, the queued saves stopped
+    # completing: a four-minute session hung in teardown for eighteen minutes
+    # at 78% CPU with one of four episodes written, and the dataset was
+    # unreadable. A twitch is a much smaller problem than losing every
+    # correction in a session.
+    #
+    # Re-enable to reproduce that, or once the interaction with encoding is
+    # understood. The mechanism -- take_episode_buffer() plus a serialized
+    # writer thread -- is sound; what it does to the video encoder is not yet.
+    async_episode_save: bool = False
     input_device: str = "keyboard"
     keyboard: DAggerKeyboardConfig = field(default_factory=DAggerKeyboardConfig)
     pedal: DAggerPedalConfig = field(default_factory=DAggerPedalConfig)

@@ -280,7 +280,9 @@ class DAggerStrategy(RolloutStrategy):
         """Initialise the inference engine and input device listener."""
         self._init_engine(ctx)
         self._push_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dagger-push")
-        self._save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dagger-save")
+        if self.config.async_episode_save:
+            self._save_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="dagger-save")
         target_mb = self.config.target_video_file_size_mb or DEFAULT_VIDEO_FILE_SIZE_IN_MB
         self._episode_duration_s = estimate_max_episode_seconds(
             ctx.data.dataset_features, ctx.runtime.cfg.fps, target_size_mb=target_mb
@@ -624,7 +626,11 @@ class DAggerStrategy(RolloutStrategy):
 
                         # Correction ended -> save episode (blocking if not streaming)
                         if old_phase == DAggerPhase.CORRECTING and new_phase == DAggerPhase.PAUSED:
-                            self._save_episode_async(dataset)
+                            if self.config.async_episode_save:
+                                self._save_episode_async(dataset)
+                            else:
+                                with self._episode_lock:
+                                    dataset.save_episode()
                             recorded += 1
                             self._needs_push.set()
                             logger.info(
