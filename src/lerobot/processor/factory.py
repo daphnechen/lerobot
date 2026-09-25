@@ -38,6 +38,7 @@ from .pipeline import (
     IdentityProcessorStep,
     PolicyProcessorPipeline,
     ProcessorStep,
+    ProcessorStepRegistry,
     RobotProcessorPipeline,
 )
 from .rename_processor import RenameObservationsProcessorStep
@@ -52,6 +53,45 @@ def make_default_teleop_action_processor() -> RobotProcessorPipeline[
         to_output=transition_to_robot_action,
     )
     return teleop_action_processor
+
+
+def make_teleop_action_processor_from_specs(
+    specs,
+) -> RobotProcessorPipeline[tuple[RobotAction, RobotObservation], RobotAction]:
+    """Build a teleop action pipeline from named steps.
+
+    ``specs`` is a list of ``RolloutConfig.ProcessorStepSpec``-shaped objects:
+    a registry ``name`` and constructor ``kwargs``. An empty list yields the
+    default identity pipeline, so callers can pass the config field through
+    unconditionally.
+
+    Steps are looked up in :class:`ProcessorStepRegistry`, so a step defined in
+    a third-party plugin resolves as long as the plugin has been imported --
+    which ``register_third_party_plugins`` does before the config is built.
+    """
+    if not specs:
+        return make_default_teleop_action_processor()
+
+    steps = []
+    for spec in specs:
+        try:
+            step_cls = ProcessorStepRegistry.get(spec.name)
+        except KeyError as exc:
+            # The registry's message already lists what is registered. What it
+            # cannot know is the usual cause of a miss here: a step defined in
+            # a plugin package that nothing has imported yet, which leaves the
+            # registry correct and empty of the one name that matters.
+            raise KeyError(
+                f"{exc.args[0]} A step from a plugin package only appears here "
+                "once that package is imported."
+            ) from exc
+        steps.append(step_cls(**spec.kwargs))
+
+    return RobotProcessorPipeline[tuple[RobotAction, RobotObservation], RobotAction](
+        steps=steps,
+        to_transition=robot_action_observation_to_transition,
+        to_output=transition_to_robot_action,
+    )
 
 
 def make_default_robot_action_processor() -> RobotProcessorPipeline[

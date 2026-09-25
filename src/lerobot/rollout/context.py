@@ -45,6 +45,7 @@ from lerobot.processor import (
     RobotObservation,
     RobotProcessorPipeline,
     make_default_processors,
+    make_teleop_action_processor_from_specs,
     rename_stats,
 )
 from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
@@ -366,6 +367,12 @@ def build_rollout_context(
         or robot_observation_processor is None
     ):
         _t, _r, _o = make_default_processors()
+        # An explicit Python argument still wins -- callers embedding a rollout
+        # can pass a pipeline they built themselves. Falling back to the config
+        # before the default is what lets `lerobot-rollout --config_path=...`
+        # reach a non-identity teleop pipeline at all.
+        if teleop_action_processor is None and cfg.teleop_action_processor:
+            _t = make_teleop_action_processor_from_specs(cfg.teleop_action_processor)
         teleop_action_processor = teleop_action_processor or _t
         robot_action_processor = robot_action_processor or _r
         robot_observation_processor = robot_observation_processor or _o

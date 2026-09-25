@@ -19,7 +19,7 @@ from __future__ import annotations
 import abc
 import logging
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import draccus
 
@@ -239,6 +239,37 @@ class DAggerStrategyConfig(RolloutStrategyConfig):
 
 
 @dataclass
+class ProcessorStepSpec:
+    """One ``ProcessorStep``, named rather than imported.
+
+    The teleop action processor turns whatever the teleoperator reports into
+    an action the robot can take. For a leader arm that is the identity: it
+    reports joint positions the follower copies. Other devices need real work
+    done first -- a SpaceMouse reports velocities and has no pose at all, so
+    its deltas have to be integrated onto the arm's current state.
+
+    That pipeline was reachable only as a Python argument to
+    ``build_rollout_context``, so any device needing a non-identity step also
+    needed its own launcher script duplicating ``lerobot-rollout``. Naming the
+    steps here instead means ``--config_path`` alone is enough, and the step
+    can live in a third-party plugin package.
+
+    ``name`` is a :class:`ProcessorStepRegistry` key, which is what that
+    registry exists for: "deserializing pipelines from configuration files
+    without hardcoding class imports". ``kwargs`` is passed to the step's
+    constructor.
+
+        teleop_action_processor:
+          - name: spacemouse_to_ee6d
+            kwargs:
+              max_translation_m: 0.02
+    """
+
+    name: str
+    kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class RolloutConfig:
     """Top-level configuration for the ``lerobot-rollout`` CLI.
 
@@ -298,6 +329,10 @@ class RolloutConfig:
     play_sounds: bool = True
     resume: bool = False
     # Rename map for mapping robot/dataset observation keys to policy keys
+    # Steps composing the teleop action processor, by registry name. Empty
+    # means the identity pipeline, which is correct for leader arms and wrong
+    # for any device that reports deltas instead of poses.
+    teleop_action_processor: list[ProcessorStepSpec] = field(default_factory=list)
     rename_map: dict[str, str] = field(default_factory=dict)
 
     # Hardware teardown
