@@ -525,7 +525,8 @@ class CycleTimer:
         if stats.starved_ticks:
             lines.append(
                 f"  ticks with no action to send (inference engine starved): {stats.starved_ticks} — "
-                "each commanded nothing and recorded no frame"
+                "no new action and no frame recorded; whether anything was sent "
+                "is the strategy's choice"
             )
         if stats.span_misses:
             lines.append(
