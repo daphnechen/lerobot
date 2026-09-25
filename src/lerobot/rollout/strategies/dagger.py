@@ -444,6 +444,25 @@ class DAggerStrategy(RolloutStrategy):
                             with timer.section("telemetry"):
                                 self._log_telemetry(obs_processed, action_dict, ctx.runtime)
                             last_action = ctx.processors.robot_action_processor((action_dict, obs))
+                        elif last_action:
+                            # Starved: the engine has no action ready. Hold the
+                            # last command rather than sending nothing.
+                            #
+                            # "Send nothing" is only harmless on a robot that
+                            # holds position when uncommanded. Under Cartesian
+                            # impedance control it does not: the arm is held by
+                            # the command stream, so a gap means it drifts, and
+                            # the next chunk then moves it from wherever it
+                            # drifted to. Resuming from an intervention is the
+                            # worst case, because engine.reset() empties the
+                            # queue and every tick is starved until the first
+                            # chunk lands -- 92 starved ticks in one session.
+                            #
+                            # This mirrors gello's HILPolicyAgent, which holds
+                            # self.last_action while its action queue refills
+                            # after an intervention is released.
+                            with timer.section("send"):
+                                robot.send_action(last_action)
                             if interpolator.emitted_policy_action:
                                 with timer.section("record"):
                                     obs_frame = build_dataset_frame(features, obs_processed, prefix=OBS_STR)
@@ -649,6 +668,25 @@ class DAggerStrategy(RolloutStrategy):
                             with timer.section("telemetry"):
                                 self._log_telemetry(obs_processed, action_dict, ctx.runtime)
                             last_action = ctx.processors.robot_action_processor((action_dict, obs))
+                        elif last_action:
+                            # Starved: the engine has no action ready. Hold the
+                            # last command rather than sending nothing.
+                            #
+                            # "Send nothing" is only harmless on a robot that
+                            # holds position when uncommanded. Under Cartesian
+                            # impedance control it does not: the arm is held by
+                            # the command stream, so a gap means it drifts, and
+                            # the next chunk then moves it from wherever it
+                            # drifted to. Resuming from an intervention is the
+                            # worst case, because engine.reset() empties the
+                            # queue and every tick is starved until the first
+                            # chunk lands -- 92 starved ticks in one session.
+                            #
+                            # This mirrors gello's HILPolicyAgent, which holds
+                            # self.last_action while its action queue refills
+                            # after an intervention is released.
+                            with timer.section("send"):
+                                robot.send_action(last_action)
 
                     timer.wait()
 
