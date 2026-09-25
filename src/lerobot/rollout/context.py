@@ -21,6 +21,7 @@ and :class:`DatasetContext` — assembled into :class:`RolloutContext`.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Callable
 from copy import copy
@@ -374,6 +375,43 @@ def build_rollout_context(
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
     logger.info("Robot connected: %s", robot.name)
+
+    # Everything from here on can raise -- a teleop that will not open, a
+    # dataset root that already exists, an inference engine that rejects the
+    # policy -- and by this point the robot is connected. On an impedance-
+    # controlled arm "connected" is not passive: the arm is under force control
+    # and holds position only because something keeps commanding it. Letting
+    # the exception escape leaves it commanded by nothing, which is floating,
+    # not holding. So unwind the hardware and re-raise unchanged.
+    try:
+        return _build_rollout_context_after_connect(
+            cfg, shutdown_event, policy, policy_config, robot, is_rtc, torch_compile_active,
+            teleop_action_processor, robot_action_processor,
+            robot_observation_processor,
+        )
+    except BaseException:
+        logger.error("Rollout setup failed after the robot was connected; "
+                     "disconnecting so the arms are not left in force mode "
+                     "with nothing commanding them.")
+        with contextlib.suppress(Exception):
+            robot.disconnect()
+        raise
+
+
+def _build_rollout_context_after_connect(
+    cfg,
+    shutdown_event,
+    policy,
+    policy_config,
+    robot,
+    is_rtc,
+    torch_compile_active,
+    teleop_action_processor,
+    robot_action_processor,
+    robot_observation_processor,
+):
+    """The rest of build_rollout_context, split out only so the connected robot
+    can be unwound by its caller if any of this raises."""
 
     # Store the initial joint positions so we can return to a safe pose on shutdown.
     initial_obs = robot.get_observation()
