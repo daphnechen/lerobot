@@ -87,9 +87,20 @@ class ActionInterpolator:
         """
         return self._emitted_policy_action
 
-    def reset(self):
-        """Reset interpolation state (call between episodes)."""
-        self._prev = None
+    def reset(self, prev: Tensor | None = None):
+        """Reset interpolation state (call between episodes).
+
+        Args:
+            prev: Where the robot IS, in action space. Supplying it is what
+                keeps the first action after a reset interpolated. Without it
+                ``_prev`` is None, ``add`` takes its "first step" branch, and
+                the next policy action is emitted whole -- a full 1/fps step
+                delivered in one tick, i.e. ``multiplier`` times the intended
+                speed. Mid-episode that is a lurch: measured on a bimanual
+                UR5e resuming from a correction, the first command was a 20 mm
+                jump (clamped from more) at 54 Hz, and the arm shook.
+        """
+        self._prev = None if prev is None else prev.clone()
         self._buffer = []
         self._idx = 0
         self._emitted_policy_action = False
@@ -116,7 +127,10 @@ class ActionInterpolator:
             # policy's own output, so make that exact.
             self._buffer.append(action.clone())
         else:
-            # First step: no previous action yet, so run at base FPS without interpolation.
+            # No reference to interpolate from: at the very start of an episode
+            # that is correct and harmless, because the policy's first action
+            # is computed from the pose the robot is already in. Resuming
+            # mid-episode is different -- see reset(prev=...).
             self._buffer = [action.clone()]
         self._prev = action.clone()
         self._idx = 0

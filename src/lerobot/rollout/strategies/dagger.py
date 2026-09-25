@@ -80,6 +80,23 @@ from .core import (
 logger = logging.getLogger(__name__)
 
 
+def _current_action_tensor(ctx: RolloutContext) -> "torch.Tensor | None":
+    """The robot's present state as an action-space tensor, or None.
+
+    Returns None when the action space is not a subset of the observation --
+    a gripper commanded by target rather than measured position, say. Priming
+    is an improvement, not a requirement, so a robot that cannot supply it
+    keeps the old behaviour instead of failing.
+    """
+    import torch
+
+    keys = ctx.data.ordered_action_keys
+    observation = ctx.hardware.robot_wrapper.get_observation()
+    if not keys or any(k not in observation for k in keys):
+        return None
+    return torch.tensor([float(observation[k]) for k in keys], dtype=torch.float32)
+
+
 # ---------------------------------------------------------------------------
 # DAgger state machine
 # ---------------------------------------------------------------------------
@@ -776,7 +793,15 @@ class DAggerStrategy(RolloutStrategy):
 
         elif new_phase == DAggerPhase.AUTONOMOUS:
             logger.info("Resuming autonomous mode - resetting engine and interpolator")
-            interpolator.reset()
+            # Prime the interpolator with where the robot IS, so the first
+            # policy action after the resume is interpolated rather than
+            # emitted whole. A bare reset() leaves no reference, and the next
+            # action then arrives in a single tick at `multiplier` times the
+            # intended speed -- on a bimanual UR5e resuming from a correction
+            # that was a 20 mm command (clamped from more) at 54 Hz, and the
+            # arm shook. The policy's first target is far from where the human
+            # left the arm, which is exactly when the step is largest.
+            interpolator.reset(_current_action_tensor(ctx))
             engine.reset()
             engine.resume()
 

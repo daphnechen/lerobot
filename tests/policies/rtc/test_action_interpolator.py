@@ -596,3 +596,42 @@ def test_queue_interpolator_delay_skips_stale_actions():
     first_action = queue.get()
     assert first_action is not None
     torch.testing.assert_close(first_action, torch.tensor([103.0, 103.0]))
+
+
+def test_reset_with_a_reference_keeps_the_next_action_interpolated():
+    """Resuming mid-episode must not deliver a whole policy step in one tick.
+
+    A bare reset() leaves no interpolation reference, so add() takes its
+    "first step" branch and emits the action whole -- `multiplier` times the
+    intended speed. At the start of an episode that is harmless, because the
+    policy's first action is computed from the pose the robot is already in.
+    Resuming from a DAgger correction is not: the policy's first target is far
+    from where the human left the arm. Measured on a bimanual UR5e, that was a
+    20 mm command (clamped from more) at 54 Hz, and the arm shook.
+    """
+    here = torch.zeros(3)
+    target = torch.tensor([3.0, 3.0, 3.0])
+
+    primed = ActionInterpolator(multiplier=3)
+    primed.reset(here)
+    primed.add(target)
+    steps = [primed.get() for _ in range(3)]
+    assert len(steps) == 3 and all(s is not None for s in steps)
+    assert steps[0].tolist() == [1.0, 1.0, 1.0], "first step should be a third of the way"
+    assert steps[-1].tolist() == target.tolist()
+    assert primed.emitted_policy_action
+
+    bare = ActionInterpolator(multiplier=3)
+    bare.reset()
+    bare.add(target)
+    assert bare.get().tolist() == target.tolist(), "documents the un-primed behaviour"
+    assert bare.get() is None, "and that it consumed the whole step in one tick"
+
+
+def test_reset_without_a_reference_is_still_supported():
+    """Priming is an improvement, not a requirement: a robot whose action space
+    is not a subset of its observation cannot supply one."""
+    i = ActionInterpolator(multiplier=2)
+    i.reset(None)
+    i.add(torch.ones(2))
+    assert i.get().tolist() == [1.0, 1.0]
