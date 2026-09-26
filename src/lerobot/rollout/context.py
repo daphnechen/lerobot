@@ -27,7 +27,7 @@ from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, field
 from threading import Event
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -305,6 +305,7 @@ def build_rollout_context(
     teleop_action_processor: RobotProcessorPipeline | None = None,
     robot_action_processor: RobotProcessorPipeline | None = None,
     robot_observation_processor: RobotProcessorPipeline | None = None,
+    policy_wrapper: Callable[[PreTrainedPolicy], Any] | None = None,
 ) -> RolloutContext:
     """Wire up policy, processors, hardware, dataset, and inference engine.
 
@@ -343,6 +344,18 @@ def build_rollout_context(
             policy.init_rtc_processor()
 
     policy = policy.to(cfg.device)
+
+    # Wrap AFTER RTC setup and device placement, BEFORE anything captures a
+    # reference. The inference engine stores the policy it is constructed with,
+    # so a wrapper applied to ctx.policy.policy afterwards would leave the
+    # engine calling the unwrapped object -- which looks exactly like a wrapper
+    # that does nothing.
+    #
+    # Used to steer a frozen generative policy from a learned latent, where the
+    # wrapper intercepts the sampler's initial draw. A wrapper is expected to
+    # delegate unknown attributes to the policy it wraps.
+    if policy_wrapper is not None:
+        policy = policy_wrapper(policy)
     policy.eval()
     logger.info("Policy loaded: type=%s, device=%s", policy_config.type, cfg.device)
 
