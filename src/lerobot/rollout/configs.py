@@ -113,6 +113,9 @@ class DAggerKeyboardConfig:
     pause_resume: str = "space"
     correction: str = "tab"
     upload: str = "enter"
+    # Mark the episode just recorded as successful. Pressed after the episode
+    # ends, so it annotates what was saved rather than what is being recorded.
+    mark_success: str = "s"
 
 
 @dataclass

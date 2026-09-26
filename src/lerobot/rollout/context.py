@@ -560,6 +560,19 @@ def _build_rollout_context_after_connect(
                     "names": None,
                 }
 
+                # A policy may expose the latent its sampler drew. Recording it
+                # is the difference between knowing what produced a transition
+                # and reconstructing a latent that would have. Only declared
+                # when a wrapper actually offers it, so an ordinary rollout
+                # gains no column.
+                noise_shape = getattr(policy, "noise_shape", None)
+                if noise_shape is not None:
+                    dataset_features["sampled_noise"] = {
+                        "dtype": "float32",
+                        "shape": tuple(noise_shape),
+                        "names": None,
+                    }
+
             repo_name = cfg.dataset.repo_id.split("/", 1)[-1]
             if not repo_name.startswith("rollout_"):
                 raise ValueError(

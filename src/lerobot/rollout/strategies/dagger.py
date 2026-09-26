@@ -46,12 +46,15 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import json
 import logging
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from threading import Event, Lock
 from typing import Any
+
+from pathlib import Path
 
 import numpy as np
 
@@ -135,6 +138,9 @@ class DAggerEvents:
         # Session-level flags
         self.stop_recording = Event()
         self.upload_requested = Event()
+        # Set between an episode ending and the next one being saved, so it
+        # annotates the episode that just finished rather than the live one.
+        self.success_marked = Event()
 
     # -- Thread-safe phase access ------------------------------------------
 
@@ -179,6 +185,7 @@ class DAggerEvents:
             self._phase = DAggerPhase.AUTONOMOUS
             self._pending_transition = None
         self.upload_requested.clear()
+        self.success_marked.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +216,8 @@ def _init_dagger_keyboard(events: DAggerEvents, cfg: DAggerKeyboardConfig):
             events.request_transition(key_to_event[name])
         if name == cfg.upload:
             events.upload_requested.set()
+        if name == cfg.mark_success:
+            events.success_marked.set()
 
     return create_key_listener(
         dispatch,
@@ -273,6 +282,10 @@ class DAggerStrategy(RolloutStrategy):
         # makes writing off the control thread safe.
         self._save_executor: ThreadPoolExecutor | None = None
         self._pending_save: Future | None = None
+        # Index of the episode most recently detached for writing, so the
+        # success annotation lands on the right one even while its save is
+        # still in flight on the writer thread.
+        self._last_saved_episode: int = -1
         self._pending_push: Future | None = None
         self._needs_push = Event()
         self._episode_lock = Lock()
@@ -458,6 +471,8 @@ class DAggerStrategy(RolloutStrategy):
                                     "task": task_str,
                                     "intervention": np.array([True], dtype=bool),
                                 }
+                                self._attach_sampled_noise(
+                                    frame, features, ctx.policy.policy)
                                 dataset.add_frame(frame)
                         correction_tick += 1
 
@@ -509,6 +524,8 @@ class DAggerStrategy(RolloutStrategy):
                                         "task": task_str,
                                         "intervention": np.array([False], dtype=bool),
                                     }
+                                    self._attach_sampled_noise(
+                                        frame, features, ctx.policy.policy)
                                     dataset.add_frame(frame)
 
                     # Episode rotation derived from the video file-size target.
@@ -632,8 +649,19 @@ class DAggerStrategy(RolloutStrategy):
                             if self.config.async_episode_save:
                                 self._save_episode_async(dataset)
                             else:
+                                episode_index = int(
+                                    dataset.writer.episode_buffer["episode_index"])
                                 with self._episode_lock:
                                     dataset.save_episode()
+                                self._last_saved_episode = episode_index
+                            # The operator marks success AFTER seeing the
+                            # outcome, so this annotates the episode just
+                            # written using whatever has been pressed since the
+                            # previous one closed.
+                            self._annotate_episode(
+                                dataset, self._last_saved_episode,
+                                events.success_marked.is_set())
+                            events.success_marked.clear()
                             recorded += 1
                             self._needs_push.set()
                             logger.info(
@@ -849,6 +877,61 @@ class DAggerStrategy(RolloutStrategy):
     # Background push (shared by both modes)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _attach_sampled_noise(frame: dict, features: dict, policy) -> dict:
+        """Add the latent the sampler drew, when the policy exposes one.
+
+        FlowDAgger's anchor buffer trains on "the noise that produced each
+        transition", and the policy is the only thing that knows it. Frames
+        recorded between two inferences share the earlier draw, which is
+        correct: that is the chunk they were executing over.
+
+        Guarded on the feature being declared, so a rollout whose policy has no
+        recorder writes no column and a dataset recorded before this stays
+        readable.
+        """
+        if "sampled_noise" not in features:
+            return frame
+        noise = getattr(policy, "latest_sampled_noise", None)
+        if noise is None:
+            # Before the first inference. Zeros rather than a skipped frame:
+            # the column has to be present on every row, and a consumer can
+            # tell these apart by their position at the start of an episode.
+            noise = np.zeros(features["sampled_noise"]["shape"], dtype=np.float32)
+        frame["sampled_noise"] = np.asarray(noise, dtype=np.float32)
+        return frame
+
+    # Success annotations live beside the dataset rather than in it: they are
+    # decided AFTER the episode is written, and a parquet column would have to
+    # be filled while recording, before anyone knows the outcome.
+    SUCCESS_SIDECAR = "episode_success.json"
+
+    def _annotate_episode(self, dataset, episode_index: int, success: bool) -> None:
+        """Record whether the operator marked this episode successful.
+
+        FlowDAgger trains only on successful episodes -- the reference
+        implementation drops a failed one entirely, corrections included, on
+        the view that a correction which did not rescue the episode is not a
+        target worth regressing onto.
+
+        Written as it happens rather than at teardown: a session that ends in a
+        fault still keeps the annotations for the episodes that completed.
+        """
+        root = getattr(dataset, "root", None)
+        if root is None:
+            return
+        path = Path(root) / self.SUCCESS_SIDECAR
+        try:
+            existing = json.loads(path.read_text()) if path.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            logger.warning("could not read %s; starting a fresh annotation file", path)
+            existing = {}
+        existing[str(episode_index)] = bool(success)
+        try:
+            path.write_text(json.dumps(existing, indent=1, sort_keys=True) + "\n")
+        except OSError as exc:
+            logger.warning("could not write episode annotation to %s: %s", path, exc)
+
     def _save_episode_async(self, dataset) -> None:
         """Hand the finished episode to a writer thread and keep controlling.
 
@@ -866,6 +949,7 @@ class DAggerStrategy(RolloutStrategy):
         metadata is not concurrency-safe.
         """
         buffer = dataset.take_episode_buffer()
+        self._last_saved_episode = int(buffer["episode_index"])
         if self._save_executor is None:          # teardown, or no executor
             with self._episode_lock:
                 dataset.save_episode(episode_data=buffer)
